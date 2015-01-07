@@ -11,6 +11,8 @@ var START_TO_END = 1;   // Range.START_TO_END
 var END_TO_END = 2;     // Range.END_TO_END
 var END_TO_START = 3;   // Range.END_TO_START
 
+var ZWS = '\u200B';
+
 var win = doc.defaultView;
 
 var ua = navigator.userAgent;
@@ -19,23 +21,17 @@ var isIOS = /iP(?:ad|hone|od)/.test( ua );
 var isMac = /Mac OS X/.test( ua );
 
 var isGecko = /Gecko\//.test( ua );
-var isIE8or9or10 = /Trident\/[456]\./.test( ua );
-var isIE8 = ( win.ie === 8 );
+var isIElt11 = /Trident\/[456]\./.test( ua );
 var isPresto = !!win.opera;
 var isWebKit = /WebKit\//.test( ua );
 
 var ctrlKey = isMac ? 'meta-' : 'ctrl-';
 
-var useTextFixer = isIE8or9or10 || isPresto;
-var cantFocusEmptyTextNodes = isIE8or9or10 || isWebKit;
-var losesSelectionOnBlur = isIE8or9or10;
-var hasBuggySplit = function ( doc ) {
-    var div = doc.createElement( 'DIV' ),
-        text = doc.createTextNode( '12' );
-    div.appendChild( text );
-    text.splitText( 2 );
-    return div.childNodes.length !== 2;
-};
+var useTextFixer = isIElt11 || isPresto;
+var cantFocusEmptyTextNodes = isIElt11 || isWebKit;
+var losesSelectionOnBlur = isIElt11;
+
+var canObserveMutations = typeof MutationObserver !== 'undefined';
 
 // Use [^ \t\r\n] instead of \S so that nbsp does not count as white-space
 var notWS = /[^ \t\r\n]/;
