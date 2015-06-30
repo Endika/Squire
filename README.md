@@ -12,7 +12,7 @@ Unlike other HTML5 rich text editors, Squire was written as a component for writ
 * Only 11.5KB of JS after minification and gzip (35KB before gzip).
 * Does not include its own XHR wrapper, widget library or lightbox overlays.
 * No dependencies.
-* No UI for a toolbar is supplied, allowing you to integrate seamlessly with the rest of your application and lose the bloat of having two UI toolkits loaded. Instead, you get a component you can drop in in place of a `<textarea>` and manipulate programatically.
+* No UI for a toolbar is supplied, allowing you to integrate seamlessly with the rest of your application and lose the bloat of having two UI toolkits loaded. Instead, you get a component you can insert in place of a `<textarea>` and manipulate programatically.
 
 ### Powerful ###
 
@@ -20,7 +20,7 @@ Squire provides an engine that handles the heavy work for you, making it easy to
 
 If you need more commands than in the simple API, I suggest you check out the source code (it's not very long), and see how a lot of the other API methods are implemented in terms of these two methods.
 
-The general philosophy of Squire is to allow the browser to do as much as it can (which unfortunately is not very much), but take control anywhere it deviates from what is required, or there are significant cross-browser differences. As such, the `document.execCommand` method is not used at all; instead all formatting is done via custom functions, and certain keys, such as 'enter' and 'backspace' are handled by the editor.
+The general philosophy of Squire is to allow the browser to do as much as it can (which unfortunately is not very much), but take control anywhere it deviates from what is required, or there are significant cross-browser differences. As such, the [`document.execCommand`](https://developer.mozilla.org/en-US/docs/Web/API/Document/execCommand) method is not used at all; instead all formatting is done via custom functions, and certain keys, such as 'enter' and 'backspace' are handled by the editor.
 
 Installation and usage
 ----------------------
@@ -30,7 +30,7 @@ Installation and usage
    would like the editor to use (or link to an external stylesheet).
 3. In your application, instead of a `<textarea>`, use an
    `<iframe src="path/to/document.html">`.
-4. In your JS, attach an event listener to the `load` event of the iframe. When
+4. In your JS, attach an event listener to the [`load` event](https://developer.mozilla.org/en-US/docs/Web/Events/load) of the iframe. When
    this fires you can grab a reference to the editor object through
    `iframe.contentWindow.editor`.
 5. Use the API below with the `editor` object to set and get data and integrate
@@ -43,9 +43,22 @@ If you load the library into a top-level document (rather than an iframe), it wi
 
 ### Setting the default block style
 
-By default, the editor will use a `<div>` for blank lines, as most users have been conditioned by Microsoft Word to expect <kbd>Enter</kbd> to act like pressing <kbd>return</kbd> on a typewriter. If you would like to use `<p>` tags (or anything else) for the default block type instead, then after calling `var editor = new Squire( document )` (or getting your reference to the ready-made `editor` instance if using the simple setup), set `editor.defaultBlockTag = 'P';`.
+By default, the editor will use a `<div>` for blank lines, as most users have been conditioned by Microsoft Word to expect <kbd>Enter</kbd> to act like pressing <kbd>return</kbd> on a typewriter. If you would like to use `<p>` tags (or anything else) for the default block type instead, you can pass a config object as the second parameter to the squire constructor. You can also
+pass a set of attributes to apply to each default block:
 
-You can also set an object of attributes to apply to each default block node by setting the *defaultBlockProperties* property, e.g. `editor.defaultBlockProperties = { style: 'font-size: 16px;' }`.
+    var editor = new Squire( document, {
+        blockTag: 'P',
+        blockAttributes: { style: 'font-size: 16px;' }
+    })
+
+If using the simple setup, call `editor.setConfig(…);` with your
+config object instead. Be sure to do this *before* calling `editor.setHTML()`.
+
+### Determining button state
+
+If you are adding a UI to Squire, you'll probably want to show a button in different states depending on whether a particular style is active in the current selection or not. For example, a "Bold" button would be in a depressed state if the text under the cursor is already bold.
+
+The efficient way to determine the state for most buttons is to monitor the "pathChange" event in the editor, and determine the state from the new path. If the selection goes across nodes, you will need to call the `hasFormat` method for each of your buttons to determine whether the styles are active. See the `getPath` and `hasFormat` documentation for more information.
 
 License
 -------
@@ -61,9 +74,9 @@ Attach an event listener to the editor. The handler can be either a function or 
 
 * **focus**: The editor gained focus.
 * **blur**: The editor lost focus
-* **keydown**: Standard DOM keydown event.
-* **keypress**: Standard DOM keypress event.
-* **keyup**: Standard DOM keyup event.
+* **keydown**: Standard [DOM keydown event](https://developer.mozilla.org/en-US/docs/Web/Events/keydown).
+* **keypress**: Standard [DOM keypress event](https://developer.mozilla.org/en-US/docs/Web/Events/keypress).
+* **keyup**: Standard [DOM keyup event](https://developer.mozilla.org/en-US/docs/Web/Events/keyup).
 * **input**: The user inserted, deleted or changed the style of some text; in other words, the result for `editor.getHTML()` will have changed.
 * **pathChange**: The path (see getPath documentation) to the cursor has changed. The new path is available as the `path` property on the event object.
 * **select**: The user selected some text.
@@ -85,6 +98,20 @@ The method takes two arguments:
 
 * **type**: The event type the handler was registered for.
 * **handler**: The handler to remove.
+
+Returns self (the Squire instance).
+
+### setKeyHandler
+
+Adds or removes a keyboard shortcut. You can use this to override the default keyboard shortcuts (e.g. Ctrl-B for bold – see the bottom of KeyHandlers.js for the list).
+
+This method takes two arguments:
+
+* **key**: The key to handle, including any modifiers in alphabetical order. e.g. `"alt-ctrl-meta-shift-enter"`
+* **fn**: The function to be called when this key is pressed, or `null` if removing a key handler. The function will be passed three arguments when called:
+  * **self**: A reference to the Squire instance.
+  * **event**: The key event object.
+  * **range**: A Range object representing the current selection.
 
 Returns self (the Squire instance).
 
@@ -136,13 +163,23 @@ The method takes one argument:
 
 Returns a reference to the newly inserted image element.
 
+### insertHTML
+
+Inserts an HTML fragment at the current cursor location, or replaces the selection if selected. The value supplied should not contain `<body>` tags or anything outside of that.
+
+The method takes one argument:
+
+* **html**: The html to insert.
+
+Returns self (the Squire instance).
+
 ### getPath
 
 Returns the path through the DOM tree from the `<body>` element to the current current cursor position. This is a string consisting of the tag, id and class names in CSS format. For example `BODY>BLOCKQUOTE>DIV#id>STRONG>SPAN.font>EM`. If a selection has been made, so different parts of the selection may have different paths, the value will be `(selection)`. The path is useful for efficiently determining the current formatting for bold, italic, underline etc, and thus determining button state. If a selection has been made, you can has the `hasFormat` method instead to get the current state for the properties you care about.
 
 ### getSelection
 
-Returns a W3C Range object representing the current selection/cursor position.
+Returns a [W3C Range object](https://developer.mozilla.org/en-US/docs/Web/API/Range) representing the current selection/cursor position.
 
 ### setSelection
 
@@ -150,7 +187,21 @@ Changes the current selection/cursor position.
 
 The method takes one argument:
 
-* **range**: The W3C Range object representing the desired selection.
+* **range**: The [W3C Range object](https://developer.mozilla.org/en-US/docs/Web/API/Range) representing the desired selection.
+
+Returns self (the Squire instance).
+
+### moveCursorToStart
+
+Removes any current selection and moves the cursor to the very beginning of the
+document.
+
+Returns self (the Squire instance).
+
+### moveCursorToEnd
+
+Removes any current selection and moves the cursor to the very end of the
+document.
 
 Returns self (the Squire instance).
 
@@ -205,13 +256,13 @@ Returns self (the Squire instance).
 
 Removes any italic formatting from the selected text.
 
-Returns self.
+Returns self (the Squire instance).
 
 ### removeUnderline
 
 Removes any underline formatting from the selected text.
 
-Returns self.
+Returns self (the Squire instance).
 
 ### makeLink
 
@@ -246,7 +297,7 @@ Sets the font size for the selected text.
 
 This method takes one argument:
 
-* **size**: A size to set. Any CSS size value is accepted, e.g. '13px', or 'small'.
+* **size**: A size to set. Any CSS [length value](https://developer.mozilla.org/en-US/docs/Web/CSS/length) or [absolute-size value](https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_values_syntax#syntax-absolute-size) is accepted, e.g. '13px', or 'small'.
 
 Returns self (the Squire instance).
 
@@ -256,7 +307,7 @@ Sets the colour of the selected text.
 
 This method takes one argument:
 
-* **colour**: The colour to set. Any CSS colour value is accepted, e.g. '#f00', or 'hsl(0,0,0)'.
+* **colour**: The colour to set. Any [CSS colour value](https://developer.mozilla.org/en-US/docs/Web/CSS/color_value) is accepted, e.g. '#f00', or 'hsl(0,0,0)'.
 
 Returns self (the Squire instance).
 
@@ -266,7 +317,7 @@ Sets the colour of the background of the selected text.
 
 This method takes one argument:
 
-* **colour**: The colour to set. Any CSS colour value is accepted, e.g. '#f00', or 'hsl(0,0,0)'.
+* **colour**: The colour to set. Any [CSS colour value](https://developer.mozilla.org/en-US/docs/Web/CSS/color_value) is accepted, e.g. '#f00', or 'hsl(0,0,0)'.
 
 Returns self (the Squire instance).
 
@@ -350,5 +401,11 @@ Returns self (the Squire instance).
 ### decreaseListLevel
 
 Decreases by 1 the nesting level of any at-least-partially selected blocks which are part of a list.
+
+Returns self (the Squire instance).
+
+### removeAllFormatting
+
+Removes all formatting from the selection. Block elements (list items, table cells, etc.) are kept as separate blocks.
 
 Returns self (the Squire instance).

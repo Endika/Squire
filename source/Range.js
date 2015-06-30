@@ -1,4 +1,4 @@
-/*jshint strict:false, undef:false, unused:false */
+/*jshint strict:false, undef:false, unused:false, latedef:false */
 
 var getNodeBefore = function ( node, offset ) {
     var children = node.childNodes;
@@ -23,43 +23,6 @@ var getNodeAfter = function ( node, offset ) {
         }
     }
     return node;
-};
-
-// ---
-
-var forEachTextNodeInRange = function ( range, fn ) {
-    range = range.cloneRange();
-    moveRangeBoundariesDownTree( range );
-
-    var startContainer = range.startContainer,
-        endContainer = range.endContainer,
-        root = range.commonAncestorContainer,
-        walker = new TreeWalker(
-            root, SHOW_TEXT, function (/* node */) {
-                return true;
-        }, false ),
-        textnode = walker.currentNode = startContainer;
-
-    while ( !fn( textnode, range ) &&
-        textnode !== endContainer &&
-        ( textnode = walker.nextNode() ) ) {}
-};
-
-var getTextContentInRange = function ( range ) {
-    var textContent = '';
-    forEachTextNodeInRange( range, function ( textnode, range ) {
-        var value = textnode.data;
-        if ( value && ( /\S/.test( value ) ) ) {
-            if ( textnode === range.endContainer ) {
-                value = value.slice( 0, range.endOffset );
-            }
-            if ( textnode === range.startContainer ) {
-                value = value.slice( range.startOffset );
-            }
-            textContent += value;
-        }
-    });
-    return textContent;
 };
 
 // ---
@@ -108,6 +71,7 @@ var insertNodeInRange = function ( range, node ) {
     } else {
         startContainer.insertBefore( node, children[ startOffset ] );
     }
+
     if ( startContainer === endContainer ) {
         endOffset += children.length - childCount;
     }
@@ -133,7 +97,7 @@ var extractContentsOfRange = function ( range, common ) {
     var endNode = split( endContainer, endOffset, common ),
         startNode = split( startContainer, startOffset, common ),
         frag = common.ownerDocument.createDocumentFragment(),
-        next;
+        next, before, after;
 
     // End node will be null if at end of child nodes list.
     while ( startNode !== endNode ) {
@@ -142,9 +106,25 @@ var extractContentsOfRange = function ( range, common ) {
         startNode = next;
     }
 
-    range.setStart( common, endNode ?
+    startContainer = common;
+    startOffset = endNode ?
         indexOf.call( common.childNodes, endNode ) :
-            common.childNodes.length );
+        common.childNodes.length;
+
+    // Merge text nodes if adjacent. IE10 in particular will not focus
+    // between two text nodes
+    after = common.childNodes[ startOffset ];
+    before = after && after.previousSibling;
+    if ( before &&
+            before.nodeType === TEXT_NODE &&
+            after.nodeType === TEXT_NODE ) {
+        startContainer = before;
+        startOffset = before.length;
+        before.appendData( after.data );
+        detach( after );
+    }
+
+    range.setStart( startContainer, startOffset );
     range.collapse( true );
 
     fixCursor( common );
@@ -204,30 +184,36 @@ var insertTreeFragmentIntoRange = function ( range, frag ) {
         deleteContentsOfRange( range );
     }
 
-    // Move range down into text ndoes
+    // Move range down into text nodes
     moveRangeBoundariesDownTree( range );
 
-    // If inline, just insert at the current position.
     if ( allInline ) {
+        // If inline, just insert at the current position.
         insertNodeInRange( range, frag );
         range.collapse( false );
-    }
-    // Otherwise, split up to body, insert inline before and after split
-    // and insert block in between split, then merge containers.
-    else {
-        var nodeAfterSplit = split( range.startContainer, range.startOffset,
-                range.startContainer.ownerDocument.body ),
+    } else {
+        // Otherwise...
+        // 1. Split up to blockquote (if a parent) or body
+        var splitPoint = range.startContainer,
+            nodeAfterSplit = split( splitPoint, range.startOffset,
+                getNearest( splitPoint.parentNode, 'BLOCKQUOTE' ) ||
+                splitPoint.ownerDocument.body ),
             nodeBeforeSplit = nodeAfterSplit.previousSibling,
             startContainer = nodeBeforeSplit,
             startOffset = startContainer.childNodes.length,
             endContainer = nodeAfterSplit,
             endOffset = 0,
             parent = nodeAfterSplit.parentNode,
-            child, node;
+            child, node, prev, next, startAnchor;
 
+        // 2. Move down into edge either side of split and insert any inline
+        // nodes at the beginning/end of the fragment
         while ( ( child = startContainer.lastChild ) &&
-                child.nodeType === ELEMENT_NODE &&
-                child.nodeName !== 'BR' ) {
+                child.nodeType === ELEMENT_NODE ) {
+            if ( child.nodeName === 'BR' ) {
+                startOffset -= 1;
+                break;
+            }
             startContainer = child;
             startOffset = startContainer.childNodes.length;
         }
@@ -236,40 +222,68 @@ var insertTreeFragmentIntoRange = function ( range, frag ) {
                 child.nodeName !== 'BR' ) {
             endContainer = child;
         }
+        startAnchor = startContainer.childNodes[ startOffset ] || null;
         while ( ( child = frag.firstChild ) && isInline( child ) ) {
-            startContainer.appendChild( child );
+            startContainer.insertBefore( child, startAnchor );
         }
         while ( ( child = frag.lastChild ) && isInline( child ) ) {
             endContainer.insertBefore( child, endContainer.firstChild );
             endOffset += 1;
         }
 
-        // Fix cursor then insert block(s)
+        // 3. Fix cursor then insert block(s) in the fragment
         node = frag;
         while ( node = getNextBlock( node ) ) {
             fixCursor( node );
         }
         parent.insertBefore( frag, nodeAfterSplit );
 
-        // Remove empty nodes created by split and merge inserted containers
-        // with edges of split
-        node = nodeAfterSplit.previousSibling;
-        if ( !nodeAfterSplit.textContent ) {
-            parent.removeChild( nodeAfterSplit );
-        } else {
-            mergeContainers( nodeAfterSplit );
+        // 4. Remove empty nodes created either side of split, then
+        // merge containers at the edges.
+        next = nodeBeforeSplit.nextSibling;
+        node = getPreviousBlock( next );
+        if ( !/\S/.test( node.textContent ) ) {
+            do {
+                parent = node.parentNode;
+                parent.removeChild( node );
+                node = parent;
+            } while ( parent && !parent.lastChild &&
+                parent.nodeName !== 'BODY' );
         }
-        if ( !nodeAfterSplit.parentNode ) {
-            endContainer = node;
-            endOffset = getLength( endContainer );
+        if ( !nodeBeforeSplit.parentNode ) {
+            nodeBeforeSplit = next.previousSibling;
+        }
+        if ( !startContainer.parentNode ) {
+            startContainer = nodeBeforeSplit || next.parentNode;
+            startOffset = nodeBeforeSplit ?
+                nodeBeforeSplit.childNodes.length : 0;
+        }
+        // Merge inserted containers with edges of split
+        if ( isContainer( next ) ) {
+            mergeContainers( next );
         }
 
-        if ( !nodeBeforeSplit.textContent) {
-            startContainer = nodeBeforeSplit.nextSibling;
-            startOffset = 0;
-            parent.removeChild( nodeBeforeSplit );
-        } else {
-            mergeContainers( nodeBeforeSplit );
+        prev = nodeAfterSplit.previousSibling;
+        node = isBlock( nodeAfterSplit ) ?
+            nodeAfterSplit : getNextBlock( nodeAfterSplit );
+        if ( !/\S/.test( node.textContent ) ) {
+            do {
+                parent = node.parentNode;
+                parent.removeChild( node );
+                node = parent;
+            } while ( parent && !parent.lastChild &&
+                parent.nodeName !== 'BODY' );
+        }
+        if ( !nodeAfterSplit.parentNode ) {
+            nodeAfterSplit = prev.nextSibling;
+        }
+        if ( !endOffset ) {
+            endContainer = prev;
+            endOffset = prev.childNodes.length;
+        }
+        // Merge inserted containers with edges of split
+        if ( nodeAfterSplit && isContainer( nodeAfterSplit ) ) {
+            mergeContainers( nodeAfterSplit );
         }
 
         range.setStart( startContainer, startOffset );
@@ -438,6 +452,7 @@ var rangeDoesStartAtBlockBoundary = function ( range ) {
         startOffset = range.startOffset;
 
     // If in the middle or end of a text node, we're not at the boundary.
+    contentWalker.root = null;
     if ( startContainer.nodeType === TEXT_NODE ) {
         if ( startOffset ) {
             return false;
@@ -460,6 +475,7 @@ var rangeDoesEndAtBlockBoundary = function ( range ) {
 
     // If in a text node with content, and not at the end, we're not
     // at the boundary
+    contentWalker.root = null;
     if ( endContainer.nodeType === TEXT_NODE ) {
         length = endContainer.data.length;
         if ( length && endOffset < length ) {
