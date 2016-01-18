@@ -698,7 +698,7 @@ var insertNodeInRange = function ( range, node ) {
 
     childCount = children.length;
 
-    if ( startOffset === childCount) {
+    if ( startOffset === childCount ) {
         startContainer.appendChild( node );
     } else {
         startContainer.insertBefore( node, children[ startOffset ] );
@@ -766,7 +766,15 @@ var extractContentsOfRange = function ( range, common ) {
 
 var deleteContentsOfRange = function ( range ) {
     // Move boundaries up as much as possible to reduce need to split.
+    // But we need to check whether we've moved the boundary outside of a
+    // block. If so, the entire block will be removed, so we shouldn't merge
+    // later.
     moveRangeBoundariesUpTree( range );
+
+    var startBlock = range.startContainer,
+        endBlock = range.endContainer,
+        needsMerge = ( isInline( startBlock ) || isBlock( startBlock ) ) &&
+            ( isInline( endBlock ) || isBlock( endBlock ) );
 
     // Remove selected range
     extractContentsOfRange( range );
@@ -777,10 +785,12 @@ var deleteContentsOfRange = function ( range ) {
     moveRangeBoundariesDownTree( range );
 
     // If we split into two different blocks, merge the blocks.
-    var startBlock = getStartBlockOfRange( range ),
+    if ( needsMerge ) {
+        startBlock = getStartBlockOfRange( range );
         endBlock = getEndBlockOfRange( range );
-    if ( startBlock && endBlock && startBlock !== endBlock ) {
-        mergeWithBlock( startBlock, endBlock, range );
+        if ( startBlock && endBlock && startBlock !== endBlock ) {
+            mergeWithBlock( startBlock, endBlock, range );
+        }
     }
 
     // Ensure block has necessary children
@@ -794,6 +804,8 @@ var deleteContentsOfRange = function ( range ) {
     if ( !child || child.nodeName === 'BR' ) {
         fixCursor( body );
         range.selectNodeContents( body.firstChild );
+    } else {
+        range.collapse( false );
     }
 };
 
@@ -1142,6 +1154,8 @@ var keys = {
     9: 'tab',
     13: 'enter',
     32: 'space',
+    33: 'pageup',
+    34: 'pagedown',
     37: 'left',
     39: 'right',
     46: 'delete',
@@ -1155,6 +1169,10 @@ var onKey = function ( event ) {
         key = keys[ code ],
         modifiers = '',
         range = this.getSelection();
+
+    if ( event.defaultPrevented ) {
+        return;
+    }
 
     if ( !key ) {
         key = String.fromCharCode( code ).toLowerCase();
@@ -1257,6 +1275,14 @@ var afterDelete = function ( self, range ) {
             fixCursor( parent );
             // Move cursor into text node
             moveRangeBoundariesDownTree( range );
+        }
+        // If you delete the last character in the sole <div> in Chrome,
+        // it removes the div and replaces it with just a <br> inside the
+        // body. Detach the <br>; the _ensureBottomLine call will insert a new
+        // block.
+        if ( node.nodeName === 'BODY' &&
+                ( node = node.firstChild ) && node.nodeName === 'BR' ) {
+            detach( node );
         }
         self._ensureBottomLine();
         self.setSelection( range );
@@ -1364,18 +1390,6 @@ var keyHandlers = {
         range = self._createRange( nodeAfterSplit, 0 );
         self.setSelection( range );
         self._updatePath( range, true );
-
-        // Scroll into view
-        if ( nodeAfterSplit.nodeType === TEXT_NODE ) {
-            nodeAfterSplit = nodeAfterSplit.parentNode;
-        }
-        var doc = self._doc,
-            body = self._body;
-        if ( nodeAfterSplit.offsetTop + nodeAfterSplit.offsetHeight >
-                ( doc.documentElement.scrollTop || body.scrollTop ) +
-                body.offsetHeight ) {
-            nodeAfterSplit.scrollIntoView( false );
-        }
     },
     backspace: function ( self, event, range ) {
         self._removeZWS();
@@ -1502,10 +1516,8 @@ var keyHandlers = {
     tab: function ( self, event, range ) {
         var node, parent;
         self._removeZWS();
-        // If no selection and in an empty block
-        if ( range.collapsed &&
-                rangeDoesStartAtBlockBoundary( range ) &&
-                rangeDoesEndAtBlockBoundary( range ) ) {
+        // If no selection and at start of block
+        if ( range.collapsed && rangeDoesStartAtBlockBoundary( range ) ) {
             node = getStartBlockOfRange( range );
             // Iterate through the block's parents
             while ( parent = node.parentNode ) {
@@ -1521,7 +1533,18 @@ var keyHandlers = {
                 }
                 node = parent;
             }
-            event.preventDefault();
+        }
+    },
+    'shift-tab': function ( self, event, range ) {
+        self._removeZWS();
+        // If no selection and at start of block
+        if ( range.collapsed && rangeDoesStartAtBlockBoundary( range ) ) {
+            // Break list
+            var node = range.startContainer;
+            if ( getNearest( node, 'UL' ) || getNearest( node, 'OL' ) ) {
+                event.preventDefault();
+                self.modifyBlocks( decreaseListLevel, range );
+            }
         }
     },
     space: function ( self, _, range ) {
@@ -1550,18 +1573,36 @@ var keyHandlers = {
     }
 };
 
-// Firefox incorrectly handles Cmd-left/Cmd-right on Mac:
+// Firefox pre v29 incorrectly handles Cmd-left/Cmd-right on Mac:
 // it goes back/forward in history! Override to do the right
 // thing.
 // https://bugzilla.mozilla.org/show_bug.cgi?id=289384
-if ( isMac && isGecko && win.getSelection().modify ) {
+if ( isMac && isGecko ) {
     keyHandlers[ 'meta-left' ] = function ( self, event ) {
         event.preventDefault();
-        self._sel.modify( 'move', 'backward', 'lineboundary' );
+        var sel = getWindowSelection( self );
+        if ( sel && sel.modify ) {
+            sel.modify( 'move', 'backward', 'lineboundary' );
+        }
     };
     keyHandlers[ 'meta-right' ] = function ( self, event ) {
         event.preventDefault();
-        self._sel.modify( 'move', 'forward', 'lineboundary' );
+        var sel = getWindowSelection( self );
+        if ( sel && sel.modify ) {
+            sel.modify( 'move', 'forward', 'lineboundary' );
+        }
+    };
+}
+
+// System standard for page up/down on Mac is to just scroll, not move the
+// cursor. On Linux/Windows, it should move the cursor, but some browsers don't
+// implement this natively. Override to support it.
+if ( !isMac ) {
+    keyHandlers.pageup = function ( self ) {
+        self.moveCursorToStart();
+    };
+    keyHandlers.pagedown = function ( self ) {
+        self.moveCursorToEnd();
     };
 }
 
@@ -1595,7 +1636,7 @@ var spanToSemantic = {
         replace: function ( doc, colour ) {
             return createElement( doc, 'SPAN', {
                 'class': 'highlight',
-                style: 'background-color: ' + colour
+                style: 'background-color:' + colour
             });
         }
     },
@@ -1742,7 +1783,7 @@ var stylesRewriters = {
     }
 };
 
-var allowedBlock = /^(?:A(?:DDRESS|RTICLE|SIDE|UDIO)|BLOCKQUOTE|CAPTION|D(?:[DLT]|IV)|F(?:IGURE|OOTER)|H[1-6]|HEADER|L(?:ABEL|EGEND|I)|O(?:L|UTPUT)|P(?:RE)?|SECTION|T(?:ABLE|BODY|D|FOOT|H|HEAD|R)|UL)$/;
+var allowedBlock = /^(?:A(?:DDRESS|RTICLE|SIDE|UDIO)|BLOCKQUOTE|CAPTION|D(?:[DLT]|IV)|F(?:IGURE|IGCAPTION|OOTER)|H[1-6]|HEADER|L(?:ABEL|EGEND|I)|O(?:L|UTPUT)|P(?:RE)?|SECTION|T(?:ABLE|BODY|D|FOOT|H|HEAD|R)|UL)$/;
 
 var blacklist = /^(?:HEAD|META|STYLE)/;
 
@@ -1794,11 +1835,8 @@ var cleanTree = function cleanTree ( node ) {
         } else {
             if ( nodeType === TEXT_NODE ) {
                 data = child.data;
-                // Use \s instead of notWS, because we want to remove nodes
-                // which are just nbsp, in order to cleanup <div>nbsp<br></div>
-                // construct.
-                startsWithWS = /\s/.test( data.charAt( 0 ) );
-                endsWithWS = /\s/.test( data.charAt( data.length - 1 ) );
+                startsWithWS = !notWS.test( data.charAt( 0 ) );
+                endsWithWS = !notWS.test( data.charAt( data.length - 1 ) );
                 if ( !startsWithWS && !endsWithWS ) {
                     continue;
                 }
@@ -1951,7 +1989,7 @@ var onPaste = function ( event ) {
         hasImage = false,
         plainItem = null,
         self = this,
-        l, item, type;
+        l, item, type, data;
 
     // Current HTML5 Clipboard interface
     // ---------------------------------
@@ -2003,20 +2041,26 @@ var onPaste = function ( event ) {
 
     // Old interface
     // -------------
-    // Currently supported by FF & Safari. *However*, Safari flat out refuses
-    // to copy stuff as text/html when copying from *within Safari*. There is
-    // no way to get an HTML version of the clipboard other than to use the
-    // fallback method.
 
-    // if ( clipboardData ) {
-    //     event.preventDefault();
-    //     if ( indexOf.call( clipboardData.types, 'text/html' ) > -1 ) {
-    //         this.insertHTML( clipboardData.getData( 'text/html' ), true );
-    //     } else {
-    //         this.insertPlainText( clipboardData.getData( 'text/plain' ), true );
-    //     }
-    //     return;
-    // }
+    // Safari (and indeed many other OS X apps) copies stuff as text/rtf
+    // rather than text/html; even from a webpage in Safari. The only way
+    // to get an HTML version is to fallback to letting the browser insert
+    // the content. Same for getting image data. *Sigh*.
+    if ( clipboardData && (
+            indexOf.call( clipboardData.types, 'text/html' ) > -1 || (
+            indexOf.call( clipboardData.types, 'text/plain' ) > -1 &&
+            indexOf.call( clipboardData.types, 'text/rtf' ) < 0 ) ) ) {
+        event.preventDefault();
+        // Abiword on Linux copies a plain text and html version, but the HTML
+        // version is the empty string! So always try to get HTML, but if none,
+        // insert plain text instead.
+        if (( data = clipboardData.getData( 'text/html' ) )) {
+            this.insertHTML( data, true );
+        } else if (( data = clipboardData.getData( 'text/plain' ) )) {
+            this.insertPlainText( data, true );
+        }
+        return;
+    }
 
     // No interface :(
     // ---------------
@@ -2123,7 +2167,6 @@ function Squire ( doc, config ) {
 
     this._events = {};
 
-    this._sel = win.getSelection();
     this._lastSelection = null;
 
     // IE loses selection state of iframe on blur, so make sure we
@@ -2275,7 +2318,7 @@ var customEvents = {
 
 proto.fireEvent = function ( type, event ) {
     var handlers = this._events[ type ],
-        i, l, obj;
+        l, obj;
     if ( handlers ) {
         if ( !event ) {
             event = {};
@@ -2285,8 +2328,9 @@ proto.fireEvent = function ( type, event ) {
         }
         // Clone handlers array, so any handlers added/removed do not affect it.
         handlers = handlers.slice();
-        for ( i = 0, l = handlers.length; i < l; i += 1 ) {
-            obj = handlers[i];
+        l = handlers.length;
+        while ( l-- ) {
+            obj = handlers[l];
             try {
                 if ( obj.handleEvent ) {
                     obj.handleEvent( event );
@@ -2385,6 +2429,33 @@ proto._createRange =
     return domRange;
 };
 
+proto.scrollRangeIntoView = function ( range ) {
+    // Get the bounding rect
+    var rect = range.getBoundingClientRect();
+    var node, parent;
+    if ( !rect.top ) {
+        node = this._doc.createElement( 'SPAN' );
+        range = range.cloneRange();
+        insertNodeInRange( range, node );
+        rect = node.getBoundingClientRect();
+        parent = node.parentNode;
+        parent.removeChild( node );
+        parent.normalize();
+    }
+    // Then check and scroll
+    var win = this._win;
+    var height = win.innerHeight;
+    var top = rect.top;
+    if ( top > height ) {
+        win.scrollBy( 0, top - height + 20 );
+    }
+    // And fire event for integrations to use
+    this.fireEvent( 'scrollPointIntoView', {
+        x: rect.left,
+        y: top
+    });
+};
+
 proto._moveCursorTo = function ( toStart ) {
     var body = this._body,
         range = this._createRange( body, toStart ? 0 : body.childNodes.length );
@@ -2399,6 +2470,10 @@ proto.moveCursorToEnd = function () {
     return this._moveCursorTo( false );
 };
 
+var getWindowSelection = function ( self ) {
+    return self._win.getSelection() || null;
+};
+
 proto.setSelection = function ( range ) {
     if ( range ) {
         // iOS bug: if you don't focus the iframe before setting the
@@ -2408,17 +2483,20 @@ proto.setSelection = function ( range ) {
         if ( isIOS ) {
             this._win.focus();
         }
-        var sel = this._sel;
-        sel.removeAllRanges();
-        sel.addRange( range );
+        var sel = getWindowSelection( this );
+        if ( sel ) {
+            sel.removeAllRanges();
+            sel.addRange( range );
+            this.scrollRangeIntoView( range );
+        }
     }
     return this;
 };
 
 proto.getSelection = function () {
-    var sel = this._sel,
+    var sel = getWindowSelection( this ),
         selection, startContainer, endContainer;
-    if ( sel.rangeCount ) {
+    if ( sel && sel.rangeCount ) {
         selection  = sel.getRangeAt( 0 ).cloneRange();
         startContainer = selection.startContainer;
         endContainer = selection.endContainer;
@@ -2503,6 +2581,7 @@ var removeZWS = function ( root ) {
                     parent = node.parentNode;
                     parent.removeChild( node );
                     node = parent;
+                    walker.currentNode = parent;
                 } while ( isInline( node ) && !getLength( node ) );
                 break;
             } else {
@@ -2664,7 +2743,7 @@ proto._keyUpDetectChange = function ( event ) {
     // 3. The key pressed is not in range 33<=x<=45 (navigation keys)
     if ( !event.ctrlKey && !event.metaKey && !event.altKey &&
             ( code < 16 || code > 20 ) &&
-            ( code < 33 || code > 45 ) )  {
+            ( code < 33 || code > 45 ) ) {
         this._docWasChanged();
     }
 };
@@ -2693,7 +2772,7 @@ proto._recordUndoState = function ( range ) {
             undoStack = this._undoStack;
 
         // Truncate stack if longer (i.e. if has been previously undone)
-        if ( undoIndex < this._undoStackLength) {
+        if ( undoIndex < this._undoStackLength ) {
             undoStack.length = this._undoStackLength = undoIndex;
         }
 
@@ -2762,6 +2841,20 @@ proto.hasFormat = function ( tag, attributes, range ) {
         return false;
     }
 
+    // Sanitize range to prevent weird IE artifacts
+    if ( !range.collapsed &&
+            range.startContainer.nodeType === TEXT_NODE &&
+            range.startOffset === range.startContainer.length &&
+            range.startContainer.nextSibling ) {
+        range.setStartBefore( range.startContainer.nextSibling );
+    }
+    if ( !range.collapsed &&
+            range.endContainer.nodeType === TEXT_NODE &&
+            range.endOffset === 0 &&
+            range.endContainer.previousSibling ) {
+        range.setEndAfter( range.endContainer.previousSibling );
+    }
+
     // If the common ancestor is inside the tag we require, we definitely
     // have the format.
     var root = range.commonAncestorContainer,
@@ -2793,6 +2886,50 @@ proto.hasFormat = function ( tag, attributes, range ) {
     return seenNode;
 };
 
+// Extracts the font-family and font-size (if any) of the element
+// holding the cursor. If there's a selection, returns an empty object.
+proto.getFontInfo = function ( range ) {
+    var fontInfo = {
+        color: undefined,
+        backgroundColor: undefined,
+        family: undefined,
+        size: undefined
+    };
+    var seenAttributes = 0;
+    var element, style;
+
+    if ( !range && !( range = this.getSelection() ) ) {
+        return fontInfo;
+    }
+
+    element = range.commonAncestorContainer;
+    if ( range.collapsed || element.nodeType === TEXT_NODE ) {
+        if ( element.nodeType === TEXT_NODE ) {
+            element = element.parentNode;
+        }
+        while ( seenAttributes < 4 && element && ( style = element.style ) ) {
+            if ( !fontInfo.color ) {
+                fontInfo.color = style.color;
+                seenAttributes += 1;
+            }
+            if ( !fontInfo.backgroundColor ) {
+                fontInfo.backgroundColor = style.backgroundColor;
+                seenAttributes += 1;
+            }
+            if ( !fontInfo.family ) {
+                fontInfo.family = style.fontFamily;
+                seenAttributes += 1;
+            }
+            if ( !fontInfo.size ) {
+                fontInfo.size = style.fontSize;
+                seenAttributes += 1;
+            }
+            element = element.parentNode;
+        }
+    }
+    return fontInfo;
+ };
+
 proto._addFormat = function ( tag, attributes, range ) {
     // If the range is collapsed we simply insert the node by wrapping
     // it round the range and focus it.
@@ -2817,13 +2954,17 @@ proto._addFormat = function ( tag, attributes, range ) {
         // Therefore we wrap this in the tag as well, as this will then cause it
         // to apply when the user types something in the block, which is
         // presumably what was intended.
+        //
+        // IMG tags are included because we may want to create a link around them,
+        // and adding other styles is harmless.
         walker = new TreeWalker(
             range.commonAncestorContainer,
             SHOW_TEXT|SHOW_ELEMENT,
             function ( node ) {
                 return ( node.nodeType === TEXT_NODE ||
-                                                    node.nodeName === 'BR' ) &&
-                    isNodeContainedInRange( range, node, true );
+                        node.nodeName === 'BR' ||
+                        node.nodeName === 'IMG'
+                    ) && isNodeContainedInRange( range, node, true );
             },
             false
         );
@@ -3564,14 +3705,18 @@ proto.insertHTML = function ( html, isPaste ) {
 
 proto.insertPlainText = function ( plainText, isPaste ) {
     var lines = plainText.split( '\n' ),
-        i, l;
-    for ( i = 1, l = lines.length - 1; i < l; i += 1 ) {
-        lines[i] = '<DIV>' +
-            lines[i].split( '&' ).join( '&amp;' )
-                    .split( '<' ).join( '&lt;'  )
-                    .split( '>' ).join( '&gt;'  )
-                    .replace( / (?= )/g, '&nbsp;' ) +
-        '</DIV>';
+        i, l, line;
+    for ( i = 0, l = lines.length; i < l; i += 1 ) {
+        line = lines[i];
+        line = line.split( '&' ).join( '&amp;' )
+                   .split( '<' ).join( '&lt;'  )
+                   .split( '>' ).join( '&gt;'  )
+                   .replace( / (?= )/g, '&nbsp;' );
+        // Wrap all but first/last lines in <div></div>
+        if ( i && i + 1 < l ) {
+            line = '<DIV>' + ( line || '<BR>' ) + '</DIV>';
+        }
+        lines[i] = line;
     }
     return this.insertHTML( lines.join( '' ), isPaste );
 };
@@ -3677,7 +3822,7 @@ proto.setTextColour = function ( colour ) {
         tag: 'SPAN',
         attributes: {
             'class': 'colour',
-            style: 'color: ' + colour
+            style: 'color:' + colour
         }
     }, {
         tag: 'SPAN',
@@ -3691,7 +3836,7 @@ proto.setHighlightColour = function ( colour ) {
         tag: 'SPAN',
         attributes: {
             'class': 'highlight',
-            style: 'background-color: ' + colour
+            style: 'background-color:' + colour
         }
     }, {
         tag: 'SPAN',
@@ -3726,7 +3871,7 @@ function removeFormatting ( self, root, clean ) {
     for ( node = root.firstChild; node; node = next ) {
         next = node.nextSibling;
         if ( isInline( node ) ) {
-            if ( node.nodeType === TEXT_NODE || isLeaf( node ) ) {
+            if ( node.nodeType === TEXT_NODE || node.nodeName === 'BR' || node.nodeName === 'IMG' ) {
                 clean.appendChild( node );
                 continue;
             }
@@ -3837,17 +3982,22 @@ proto.removeList = command( 'modifyBlocks', removeList );
 proto.increaseListLevel = command( 'modifyBlocks', increaseListLevel );
 proto.decreaseListLevel = command( 'modifyBlocks', decreaseListLevel );
 
-if ( top !== win ) {
-    win.editor = new Squire( doc );
-    if ( win.onEditorLoad ) {
-        win.onEditorLoad( win.editor );
-        win.onEditorLoad = null;
-    }
+if ( typeof exports === 'object' ) {
+    module.exports = Squire;
+} else if ( typeof define === 'function' && define.amd ) {
+    define( function () {
+        return Squire;
+    });
 } else {
-    if ( typeof exports === 'object' ) {
-        module.exports = Squire;
-    } else {
-        win.Squire = Squire;
+    win.Squire = Squire;
+
+    if ( top !== win &&
+            doc.documentElement.getAttribute( 'data-squireinit' ) === 'true' ) {
+        win.editor = new Squire( doc );
+        if ( win.onEditorLoad ) {
+            win.onEditorLoad( win.editor );
+            win.onEditorLoad = null;
+        }
     }
 }
 

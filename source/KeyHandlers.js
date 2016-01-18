@@ -5,6 +5,8 @@ var keys = {
     9: 'tab',
     13: 'enter',
     32: 'space',
+    33: 'pageup',
+    34: 'pagedown',
     37: 'left',
     39: 'right',
     46: 'delete',
@@ -18,6 +20,10 @@ var onKey = function ( event ) {
         key = keys[ code ],
         modifiers = '',
         range = this.getSelection();
+
+    if ( event.defaultPrevented ) {
+        return;
+    }
 
     if ( !key ) {
         key = String.fromCharCode( code ).toLowerCase();
@@ -120,6 +126,14 @@ var afterDelete = function ( self, range ) {
             fixCursor( parent );
             // Move cursor into text node
             moveRangeBoundariesDownTree( range );
+        }
+        // If you delete the last character in the sole <div> in Chrome,
+        // it removes the div and replaces it with just a <br> inside the
+        // body. Detach the <br>; the _ensureBottomLine call will insert a new
+        // block.
+        if ( node.nodeName === 'BODY' &&
+                ( node = node.firstChild ) && node.nodeName === 'BR' ) {
+            detach( node );
         }
         self._ensureBottomLine();
         self.setSelection( range );
@@ -227,18 +241,6 @@ var keyHandlers = {
         range = self._createRange( nodeAfterSplit, 0 );
         self.setSelection( range );
         self._updatePath( range, true );
-
-        // Scroll into view
-        if ( nodeAfterSplit.nodeType === TEXT_NODE ) {
-            nodeAfterSplit = nodeAfterSplit.parentNode;
-        }
-        var doc = self._doc,
-            body = self._body;
-        if ( nodeAfterSplit.offsetTop + nodeAfterSplit.offsetHeight >
-                ( doc.documentElement.scrollTop || body.scrollTop ) +
-                body.offsetHeight ) {
-            nodeAfterSplit.scrollIntoView( false );
-        }
     },
     backspace: function ( self, event, range ) {
         self._removeZWS();
@@ -365,10 +367,8 @@ var keyHandlers = {
     tab: function ( self, event, range ) {
         var node, parent;
         self._removeZWS();
-        // If no selection and in an empty block
-        if ( range.collapsed &&
-                rangeDoesStartAtBlockBoundary( range ) &&
-                rangeDoesEndAtBlockBoundary( range ) ) {
+        // If no selection and at start of block
+        if ( range.collapsed && rangeDoesStartAtBlockBoundary( range ) ) {
             node = getStartBlockOfRange( range );
             // Iterate through the block's parents
             while ( parent = node.parentNode ) {
@@ -384,7 +384,18 @@ var keyHandlers = {
                 }
                 node = parent;
             }
-            event.preventDefault();
+        }
+    },
+    'shift-tab': function ( self, event, range ) {
+        self._removeZWS();
+        // If no selection and at start of block
+        if ( range.collapsed && rangeDoesStartAtBlockBoundary( range ) ) {
+            // Break list
+            var node = range.startContainer;
+            if ( getNearest( node, 'UL' ) || getNearest( node, 'OL' ) ) {
+                event.preventDefault();
+                self.modifyBlocks( decreaseListLevel, range );
+            }
         }
     },
     space: function ( self, _, range ) {
@@ -413,18 +424,36 @@ var keyHandlers = {
     }
 };
 
-// Firefox incorrectly handles Cmd-left/Cmd-right on Mac:
+// Firefox pre v29 incorrectly handles Cmd-left/Cmd-right on Mac:
 // it goes back/forward in history! Override to do the right
 // thing.
 // https://bugzilla.mozilla.org/show_bug.cgi?id=289384
-if ( isMac && isGecko && win.getSelection().modify ) {
+if ( isMac && isGecko ) {
     keyHandlers[ 'meta-left' ] = function ( self, event ) {
         event.preventDefault();
-        self._sel.modify( 'move', 'backward', 'lineboundary' );
+        var sel = getWindowSelection( self );
+        if ( sel && sel.modify ) {
+            sel.modify( 'move', 'backward', 'lineboundary' );
+        }
     };
     keyHandlers[ 'meta-right' ] = function ( self, event ) {
         event.preventDefault();
-        self._sel.modify( 'move', 'forward', 'lineboundary' );
+        var sel = getWindowSelection( self );
+        if ( sel && sel.modify ) {
+            sel.modify( 'move', 'forward', 'lineboundary' );
+        }
+    };
+}
+
+// System standard for page up/down on Mac is to just scroll, not move the
+// cursor. On Linux/Windows, it should move the cursor, but some browsers don't
+// implement this natively. Override to support it.
+if ( !isMac ) {
+    keyHandlers.pageup = function ( self ) {
+        self.moveCursorToStart();
+    };
+    keyHandlers.pagedown = function ( self ) {
+        self.moveCursorToEnd();
     };
 }
 
